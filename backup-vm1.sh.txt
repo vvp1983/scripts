@@ -1,0 +1,166 @@
+#!/bin/bash
+
+NAME="BACKUP VM"
+STORAGE_DIR="/storage"
+REMOTE_PROD="10.100.1.2"
+BACKUP_USER="backup-vm"
+BACKUP_FILE_SUFFIX_LOG=".backup.log"
+LOCAL_HOST="10.200.1.212"
+BACKUP_FOLDER="/storage/backup"
+STORAGE_FOLDER="/spo-storage"
+DATA_FOLDER="/spo-data"
+DOCKER_COMPOSE_FILE="/opt/spo/docker-compose.yml"
+SSH_KEY_NAME="id_rsa"
+
+echo "Run script at `date +%Y-%m-%d`" > /tmp/$REMOTE_PROD$BACKUP_FILE_SUFFIX_LOG
+
+exec 3>&1 4>&2
+exec &>> /tmp/$REMOTE_PROD$BACKUP_FILE_SUFFIX_LOG
+
+
+if [ -z "$TELEGRAM_CHAT_ID" ]; then
+    echo "TELEGRAM_CHAT_ID is unset or set to the empty string"
+    CHAT_ID="-100110"
+else
+    CHAT_ID=$TELEGRAM_CHAT_ID
+fi
+
+if [ -z "$TELEGRAM_BOT" ]; then
+    echo "TELEGRAM_BOT is unset or set to the empty string"
+    TELEGRAM_BOT="bot46178"
+else
+    TELEGRAM_BOT=$TELEGRAM_BOT
+fi
+
+if [ -z "$TELEGRAM_KEY" ]; then
+    echo "TELEGRAM_KEY is unset or set to the empty string"
+    TELEGRAM_KEY="AA111-Sbbl0r10RJJQVHsT"
+else
+    TELEGRAM_KEY=$TELEGRAM_KEY
+fi
+
+
+
+#colours
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+NC='\033[0m'
+
+END=0
+
+
+function exitCode() {
+    retVal=$1
+
+    if [ $retVal -eq 0 ]; then
+ echo -e "   $GREEN step successfull $NC"
+ REPORT="$REPORT $NAME_STEP successfull\n"
+ if [ $END -eq 1 ]; then
+exec 1>&3 2>&4
+
+ fi
+    else
+ echo -e "   $RED  step error $NC $retVal"
+ REPORT="$REPORT $NAME_STEP error $retVal\n"
+ curl 'https://api.telegram.org/'"$TELEGRAM_BOT"':'"$TELEGRAM_KEY"'/sendMessage?chat_id='"$CHAT_ID"'&parse_mode=HTML' --data-urlencode $"text=$NAME - ERROR $NAME_STEP"
+ exec 1>&3 2>&4
+ curl -F  document=@/tmp/$REMOTE_PROD$BACKUP_FILE_SUFFIX_LOG 'https://api.telegram.org/'"$TELEGRAM_BOT"':'"$TELEGRAM_KEY"'/sendDocument?chat_id='"$CHAT_ID"
+exit 1
+    fi
+}
+
+
+NAME_STEP='1. Stop local reserv system'
+
+    echo -e "$NAME_STEP"
+ (/usr/local/bin/docker-compose  -f $DOCKER_COMPOSE_FILE stop) &
+wait
+    retVal=$?
+    exitCode $retVal
+
+#2. Run script
+    echo -e "2. Run script"
+
+NAME_STEP='2. a) copy dump DB to local reserv system from remote system'
+
+    echo -e "$NAME_STEP"
+ (ssh -o StrictHostKeyChecking=no -i ${HOME}/.ssh/id_rsa $BACKUP_USER@$REMOTE_PROD "docker exec -t vm1-db pg_dump -o -U vm1 | bzip2" | cat >  ~/backups/$REMOTE_PROD.dump_`date +%Y-%m-%d`.sql.bz2) &
+wait
+    retVal=$?
+    exitCode $retVal
+
+NAME_STEP='  b) copy data to local reserv system from remote system'
+
+    echo -e "$NAME_STEP"
+ (ssh -i ${HOME}/.ssh/id_rsa $BACKUP_USER@$REMOTE_PROD "docker run --rm -i  -v $STORAGE_DIR/$STORAGE_FOLDER:/from  -v /home/$BACKUP_USER/.ssh/$SSH_KEY_NAME:/tmp/id_rsa instrumentisto/rsync-ssh  rsync -avz --chown=1001:1005  -e \"ssh  -o StrictHostKeyChecking=no -i /tmp/id_rsa\" /from/./ $BACKUP_USER@$LOCAL_HOST:$STORAGE_DIR$STORAGE_FOLDER") &
+
+
+wait
+    retVal=$?
+    exitCode $retVal
+
+
+NAME_STEP='  c) stop, delete containers from local docker'
+
+    echo -e "$NAME_STEP"
+(/usr/local/bin/docker-compose  -f $DOCKER_COMPOSE_FILE down) &
+
+wait
+    retVal=$?
+    exitCode $retVal
+
+
+NAME_STEP='  d) delete $STORAGE_DIR/$DATA_FOLDER '
+
+    echo -e "$NAME_STEP"
+
+(/usr/bin/docker run --tty --rm -v $STORAGE_DIR:/work alpine:latest rm -rf /work/$DATA_FOLDER) &
+
+wait
+
+    retVal=$?
+    exitCode $retVal
+
+NAME_STEP='  e) create volumes'
+
+    echo -e "$NAME_STEP"
+
+ (mkdir  $STORAGE_DIR/$DATA_FOLDER) &
+
+wait
+    #error="Error: $error1 $error2"
+    retVal=$?
+    exitCode $retVal
+
+NAME_STEP='  f) Pull images. Start reserv DB system'
+
+    echo -e "$NAME_STEP"
+(/usr/local/bin/docker-compose  -f $DOCKER_COMPOSE_FILE  build && /usr/local/bin/docker-compose  -f $DOCKER_COMPOSE_FILE  build && /usr/local/bin/docker-compose  -f $DOCKER_COMPOSE_FILE up -d database)&
+wait
+ retVal=$?
+ exitCode $retVal
+
+ until (/usr/bin/docker exec --tty vm1-db psql -U vm1 -c "select 1"); do (sleep 5; echo -e "$RED sleep 5 secs$NC")  done
+
+NAME_STEP='  g) Export dump to DB container'
+
+    echo -e "$NAME_STEP "
+(bunzip2 -c ${HOME}/backups/$REMOTE_PROD.dump_`date +%Y-%m-%d`.sql.bz2 | docker exec -i vm1-db psql -U vm1)&
+
+wait
+    retVal=$?
+    exitCode $retVal
+
+NAME_STEP='  e) Start all containers'
+
+    echo -e "$NAME_STEP"
+(/usr/local/bin/docker-compose  -f $DOCKER_COMPOSE_FILE up -d) &
+
+wait
+
+    retVal=$?
+    END=1
+    exitCode $retVal
+
+
+

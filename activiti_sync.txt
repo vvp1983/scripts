@@ -1,0 +1,260 @@
+#!/usr/bin/perl
+
+
+#
+# Создание процессов в Activiti из внешнего источника
+#
+use strict;
+use warnings;
+use Data::Dumper;
+#use HTTP::Request::Common qw(POST);
+use JSON;
+use LWP::UserAgent;
+
+use JSON::Parse 'parse_json_safe';
+
+use DBI;
+use utf8;
+
+use Encode;
+binmode(STDOUT,':utf8');
+
+
+use MIME::Base64;
+
+my $user='admin';
+my $pass='Bat1114lash';
+my $base_url='https://qa.domain.local/';
+
+
+my $token=GetAuthToken($user,$pass,$base_url);
+my $sites_url='api/user/orgs';
+my $people_url='/api/user/org/';
+my $json_sites=GetRequestData($base_url."".$sites_url."?auth_token=".$token);
+
+
+my %l_site=parseSite($json_sites);
+my %h_site_members;
+
+my $query_update_task_users1="";
+my $query_update_task_users2="";
+
+
+
+#ИМПОРТ полученных данных в БД АКТИВИТИ
+# имя базы данных
+$dbname = "activiti";
+# имя пользователя
+$username = "activiti";
+# пароль
+$password = "act2017111";
+# имя или IP адрес сервера
+$dbhost = "172.19.0.108";
+# порт
+$dbport = "5432";
+# опции
+$dboptions = "-e";
+# терминал
+$dbtty = "ansi";
+
+$dbh = DBI->connect("dbi:Pg:dbname=$dbname;host=$dbhost;port=$dbport;options=$dboptions;tty=$dbtty","$username","$password",
+            {PrintError => 0});
+
+if ($DBI::err != 0) {
+  print $DBI::errstr . "\n";
+  exit($DBI::err);
+}
+
+
+$sth=$dbh->prepare($query_update_task_users1) or die "Couldn\'t prepare statement: " . $dbh->errstr;
+$res=$sth->execute();
+
+$sth=$dbh->prepare($query_update_task_users2) or die "Couldn\'t prepare statement: " . $dbh->errstr;
+$res=$sth->execute();
+
+
+
+$sth->finish();
+$dbh->disconnect();
+
+
+# Получение данных с авторизацией по токену
+sub GetAuthToken {
+ my ($user, $pass, $url) = @_;
+
+ # add the token request api handler to the url
+$url .= 'api/user/login';
+
+ my $params = '{ "username":"'.$user.'", "password":"'. $pass.'"}';
+
+ my $ua = LWP::UserAgent->new;
+ my $resp = $ua->post($url, Content=>$params, 'Content-type' => 'Application/json');
+# print $resp->content;
+ return decode_json($resp->content)->{token};
+}
+
+# Получение данных с basic авторизацией
+sub GetRequestDataBasicAuth {
+ my ($user, $pass, $url) = @_;
+
+ # add the token request api handler to the url
+#$url= 'https://dev-portal.domain.local/alfresco/s/api/people';
+
+ my $auth= encode_base64("$user:$pass");
+ my $ua = LWP::UserAgent->new;
+ my $resp = $ua->get($url,'Authorization' => 'Basic '.$auth.'\'');
+
+# print $resp->content;
+ return decode_utf8($resp->content);
+}
+
+
+
+sub GetRequestData {
+ my ($url) = @_;
+
+ my $ua = LWP::UserAgent->new;
+ my $resp = $ua->get($url);
+ #print $resp->content;
+ return decode_utf8($resp->content);
+}
+
+
+
+sub parse
+{
+    my $req=shift;
+    my @values;
+
+     my $p = parse_json_safe($req);
+#print $p;
+    if( $@ ) {return;};
+
+    if(ref($p) eq 'HASH')
+    {
+     my $empty=$p->{'empty'};
+    if ( $empty ) { return ; };
+
+# print ref( @{%{ $p->{'list'} }->{'entries'}}[0] );
+  my $size=@{ ${ $p->{'list'} }{'entries'}};
+
+    foreach my $rec (@{${ $p->{'list'} }{'entries'}})
+    {
+#       print    ${ ${ $rec }{'entry'} }{'id'};
+        push @values,  ${ ${ $rec }{'entry'} }{'id'};
+        }
+   }
+   return @values;
+}
+
+
+#Парсинг полученных организаций
+sub parseSite
+{
+    my $req=shift;
+    my %values;
+
+     my $p = parse_json_safe($req);
+#print $p;
+    if( $@ ) {return;};
+
+    if(ref($p) eq 'HASH')
+    {
+     my $empty=$p->{'empty'};
+    if ( $empty ) { return ; };
+
+# print ref( @{%{ $p->{'list'} }->{'entries'}}[0] );
+
+
+    foreach my $rec (@{${ $p->{'list'} }{'entries'}})
+    {
+        $values{ ${ ${ $rec }{'entry'} }{'id'}  }= ${ ${ ${ $rec }{'entry'} }{'site'} }{'title'};
+        }
+   }
+   return %values;
+}
+
+
+
+#Парсинг полученных пользователей
+sub parseUsers
+{
+    my $req=shift;
+    my %values;
+    my $query_update_users="";
+
+     my $p = parse_json_safe($req);
+
+    if( $@ ) {return;};
+
+    if(ref($p) eq 'HASH')
+    {
+    foreach my $rec (@{ $p->{'people'} })
+    {
+        $query_update_users.="\,(\'".${ $rec }{'firstName'}." ".${ $rec }{'lastName'}."\',\'".${ $rec }{'userName'}."\')";
+        $query_update_task_users1.="\,(\'p234235dfgdeg\',1,\'".${ $rec }{'firstName'}."\',\'".${ $rec }{'lastName'}."\',\'".${ $rec }{'userName'}."\')";
+        $query_update_task_users2.="\,(\'".${ $rec }{'userName'}."\,\'management\'')";
+#       print     ${ $rec }{'email'};
+        }
+     }
+
+    ($query_update_users)= $query_update_users =~ /^\,(.*)/;
+     $query_update_users="INSERT INTO public.dictusers(user_name, user_id) VALUES".$query_update_users." ON CONFLICT (user_id) DO UPDATE SET user_name=EXCLUDED.user_name;";
+
+    ($query_update_task_users1)= $query_update_task_users1 =~ /^\,(.*)/;
+     $query_update_task_users1="INSERT INTO ACT_ID_USER (PWD_, REV_, FIRST_, LAST_,ID_) VALUES".$query_update_task_users1." ON CONFLICT (ID_) DO UPDATE SET FIRST_ =  EXCLUDED.FIRST_, LAST_=EXCLUDED.LAST_,REV_=ACT_ID_USER.REV_;";
+
+    ($query_update_task_users2)= $query_update_task_users2 =~ /^\,(.*)/;
+     $query_update_task_users2="INSERT INTO act_id_membership (USER_ID_, GROUP_ID_) VALUES".$query_update_task_users2." ON CONFLICT(user_id_, group_id_) DO NOTHING;";
+
+
+    print $query_update_task_users1."\n";
+    print $query_update_task_users2."\n";
+    return $query_update_users;
+}
+
+
+
+sub parseProcessInstance
+{
+
+    my $req=shift;
+    my %values;
+    my $query_update_dictTemplate="";
+
+     my $p = parse_json_safe($req);
+
+    if( $@ ) {return;};
+
+    if(ref($p) eq 'HASH')
+    {
+    foreach my $rec (@{ $p->{'data'} })
+    {
+        my $businessKey=${ $rec }{'businessKey'};
+        if(!exists( $values{$businessKey}))
+        {
+
+        print     $businessKey." ";
+        foreach my $variables ( @ { ${ $rec }{'variables'} } )
+            {
+                if( $ { $variables }{'name'} eq 'TemplateName')
+                {
+                $values{ $businessKey } = $ { $variables }{'value'};
+                print  $ { $variables }{'value'}."\n";
+                $query_update_dictTemplate.="\,(\'".$businessKey ."\',\'".$ { $variables }{'value'}."\',\'123\')";
+                last;
+                }
+            }
+          }
+        }
+     }
+
+    ($query_update_dictTemplate)= $query_update_dictTemplate =~ /^\,(.*)/;
+     $query_update_dictTemplate="INSERT INTO public.dicttemplate(template_id, template_name, site_id) VALUES".$query_update_dictTemplate." ON CONFLICT (template_id) DO UPDATE SET template_name=EXCLUDED.template_name;";
+
+
+    print  $query_update_dictTemplate."\n";
+    return $query_update_dictTemplate;
+
+
+}
